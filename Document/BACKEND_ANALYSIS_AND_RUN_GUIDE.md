@@ -50,7 +50,7 @@ backend/
 │   ├── FYP_DOCUMENT_ALIGNMENT.md # FYP requirements vs implementation
 │   └── BACKEND_ANALYSIS_AND_RUN_GUIDE.md  # This file
 │
-├── models/                  # (Created by training) emotion_model.pth, sale_model.pkl, etc.
+├── models/                  # Model artifacts (sale_model.pkl, best_emotion_wav2vec2_v2/best_checkpoint, etc.)
 ├── uploads/                 # (Created at runtime) uploaded audio
 ├── output/                  # (Created at runtime) analysis outputs
 └── .env                     # (You create) env vars — see CONFIGURATION.md
@@ -194,8 +194,8 @@ python -m pytest tests/test_models.py -v
 
 If you want to train or retrain models:
 
-- **Emotion model (CNN+LSTM):**  
-  `scripts/train_emotion_model.py` — expects RAVDESS-style data; outputs e.g. `backend/models/emotion_model.pth`.
+- **Emotion model (recommended Wav2Vec2 pipeline):**  
+  `scripts/best_train_emotion_model.py` — expects RAVDESS-style data; outputs `backend/models/best_emotion_wav2vec2_v2/best_checkpoint` (or custom `--output_dir`).
 - **Sale predictor (XGBoost):**  
   `scripts/train_sale_predictor.py` — expects a CSV with fused features and `sale_outcome`; outputs `sale_model.pkl`, scaler, etc.
 - **Dataset generation for sale model:**  
@@ -231,7 +231,7 @@ Full list and defaults are in `config.py` and `CONFIGURATION.md`.
 | Install deps | `pip install -e .` or `pip install -r requirements.txt` |
 | Set config | Create `backend/.env` from `CONFIGURATION.md` |
 | Run tests | `python -m pytest tests/ -v` |
-| Train emotion model | `python scripts/train_emotion_model.py ...` (see scripts/README_TRAINING.md) |
+| Train emotion model | `python scripts/best_train_emotion_model.py --mode train ...` (see scripts/README_TRAINING.md) |
 | Train sale model | `python scripts/train_sale_predictor.py ...` (see scripts/README_TRAINING.md) |
 
 ---
@@ -239,5 +239,6 @@ Full list and defaults are in `config.py` and `CONFIGURATION.md`.
 ## 7. Notes
 
 - **`run_demo.py`** is a thin wrapper that sets `sys.path` and calls `DemoSystem().run_demo()` so the README’s “run the demo” instruction works.
-- **Models:** If `backend/models/` is missing or models are not trained, the app may still run in demo/simulated mode; real inference may require training first (see `scripts/README_TRAINING.md` and `docs/COMPLETE_SYSTEM_FLOW.md`).
+- **Models:** Current repo includes `backend/models/sale_model.pkl` and emotion checkpoint artifacts under `backend/models/best_emotion_wav2vec2_v2/`. For runtime, set `EMOTION_MODEL_PATH=backend/models/best_emotion_wav2vec2_v2/best_checkpoint` if needed.
 - **Warnings:** Non-critical warnings (e.g. ffmpeg, optional libs) are explained in `WARNINGS_FIX.md`.
+

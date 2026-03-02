@@ -20,13 +20,13 @@ This document visualizes the entire process from model training to real-world us
 │   (1440 audio files) │         │   features          │
 │                      │         │ • Columns:           │
 │ Process:             │         │   - sentiment_mean   │
-│ • Extract MFCC       │         │   - sentiment_var   │
-│ • Extract Mel-Spec   │         │   - emotion_probs   │
-│ • Train CNN+LSTM     │         │   - dynamics         │
+│ • Prepare waveform batches       │         │   - sentiment_var   │
+│ • Tokenize audio for Wav2Vec2   │         │   - emotion_probs   │
+│ • Fine-tune Wav2Vec2     │         │   - dynamics         │
 │ • 5 emotion classes  │         │   - sale_outcome     │
 │                      │         │                      │
 │ Output:              │         │ Process:             │
-│ • emotion_model.pth  │         │ • Train XGBoost      │
+│ • best_emotion_wav2vec2_v2/best_checkpoint  │         │ • Train XGBoost      │
 │ • emotion_dataset_   │         │ • Calibrate probs    │
 │   stats.json         │         │ • Feature importance │
 │ • training_history   │         │                      │
@@ -42,7 +42,7 @@ This document visualizes the entire process from model training to real-world us
 └─────────────────────────────────────────────────────────────────────────┘
 
 backend/models/
-├── emotion_model.pth                    (2.7MB)  ← CNN+LSTM weights
+├── best_emotion_wav2vec2_v2/best_checkpoint                    (2.7MB)  ← Wav2Vec2 checkpoint artifacts
 ├── emotion_dataset_stats.json           (normalization stats)
 ├── emotion_training_history.json        (training metrics)
 ├── sale_model.pkl                       (41KB)   ← XGBoost model
@@ -126,11 +126,11 @@ User uploads audio file (.wav, .mp3, .m4a)
 │  Model 2: EmotionDetector (AcousticEmotionModel - CNN+LSTM)             │
 ├─────────────────────────────────────────────────────────────────────────┤
 │ Location: backend/src/call_analysis/models.py                           │
-│ Model File: backend/models/emotion_model.pth                            │
+│ Model File: backend/models/best_emotion_wav2vec2_v2/best_checkpoint                            │
 │                                                                          │
 │ Input:  Audio features (Mel-Spectrogram + MFCC)                         │
 │ Process:                                                                 │
-│   • Load emotion_model.pth (trained CNN+LSTM)                            │
+│   • Load best_emotion_wav2vec2_v2/best_checkpoint (trained Wav2Vec2)                            │
 │   • Extract segment-level mel-spectrograms                              │
 │   • Run inference per segment                                           │
 │   • Apply normalization (from emotion_dataset_stats.json)               │
@@ -223,8 +223,8 @@ Frontend (Next.js/React)
 [RAVDESS Dataset] ──▶ [train_emotion_model.py]
                            │
                            ├─▶ Extract Features (librosa)
-                           ├─▶ Train CNN+LSTM
-                           └─▶ Save → backend/models/emotion_model.pth
+                           ├─▶ Fine-tune Wav2Vec2
+                           └─▶ Save → backend/models/best_emotion_wav2vec2_v2/best_checkpoint
 
 [CSV with Features] ──▶ [train_sale_predictor.py]
                            │
@@ -259,7 +259,7 @@ Frontend (Next.js/React)
         │   └─▶ Sentiment scores per segment
         │
         ├─▶ EmotionDetector (CNN+LSTM)
-        │   └─▶ Load: emotion_model.pth
+        │   └─▶ Load: best_emotion_wav2vec2_v2/best_checkpoint
         │   └─▶ Emotion per segment
         │
         └─▶ SalePredictor (XGBoost)
@@ -293,7 +293,7 @@ Frontend (Next.js/React)
 **Training:**
 - Script: `backend/scripts/train_emotion_model.py`
 - Input: RAVDESS audio files
-- Output: `backend/models/emotion_model.pth`
+- Output: `backend/models/best_emotion_wav2vec2_v2/best_checkpoint`
 
 **Inference:**
 - Location: `backend/src/call_analysis/models.py` → `EmotionDetector.detect_conversation_emotions()`
@@ -303,7 +303,7 @@ Frontend (Next.js/React)
 
 **Flow:**
 ```
-Audio File → librosa → Mel-Spectrogram → emotion_model.pth → Emotion Labels
+Audio File → librosa → Mel-Spectrogram → best_emotion_wav2vec2_v2/best_checkpoint → Emotion Labels
 ```
 
 ---
@@ -373,7 +373,7 @@ analyzer.sentiment_analyzer.analyze_conversation_sentiment()
   → Uses DistilBERT (loaded lazily)
   
 analyzer.emotion_detector.detect_conversation_emotions()
-  → Loads emotion_model.pth
+  → Loads best_emotion_wav2vec2_v2/best_checkpoint
   → Runs CNN+LSTM inference
   
 analyzer.sale_predictor.predict_sale_probability()
@@ -402,7 +402,7 @@ GET /api/results/{call_id}
 - `backend/scripts/train_sale_predictor.py` - Trains XGBoost
 
 ### Model Files (Saved After Training)
-- `backend/models/emotion_model.pth` - CNN+LSTM weights
+- `backend/models/best_emotion_wav2vec2_v2/best_checkpoint` - Wav2Vec2 checkpoint artifacts
 - `backend/models/emotion_dataset_stats.json` - Normalization stats
 - `backend/models/sale_model.pkl` - XGBoost model
 - `backend/models/sale_model_scaler.pkl` - Feature scaler
@@ -462,7 +462,7 @@ User Action: Upload call_recording.wav
         │   └─▶ Sentiment: positive/negative/neutral per segment
         │
         ├─▶ EmotionDetector (CNN+LSTM)
-        │   └─▶ Loads: emotion_model.pth
+        │   └─▶ Loads: best_emotion_wav2vec2_v2/best_checkpoint
         │   └─▶ Emotion: happiness/anger/sadness/etc per segment
         │
         └─▶ SalePredictor (XGBoost)
@@ -492,4 +492,6 @@ User Action: Upload call_recording.wav
 ---
 
 This is the complete flow from training to production usage! 🚀
+
+
 

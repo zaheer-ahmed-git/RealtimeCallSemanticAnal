@@ -7,22 +7,22 @@ This document outlines the current status and any remaining tasks for your Final
 **Overall Compliance:** 98% (per FYP_DOCUMENT_ALIGNMENT.md)  
 **Overall Completion:** ~80% (updated assessment)  
 **Architecture:** ✅ Complete  
-**Real Models:** ✅ **TRAINED AND READY**  
+**Real Models:** ? **ARTIFACTS AVAILABLE IN REPO**
 **Integration:** ✅ Complete and Tested
 
 ---
 
 ## ✅ Completed Features (All Implemented!)
 
-The following features have been fully implemented and are production-ready:
+The following features have been implemented in code and are ready for integration testing:
 
 ### Core ML Features
 1. **FinBERT Support** ✅ - Sentiment analyzer supports both DistilBERT and FinBERT
 2. **Key Phrase Extraction** ✅ - Automatically extracts important phrases from conversations using spaCy
 3. **Enhanced Confidence Intervals** ✅ - Improved prediction uncertainty estimation with logit transformation
 4. **Filler Word Detection** ✅ - Detects and counts filler words (um, uh, like, etc.) in conversational dynamics
-5. **Trained Emotion Model** ✅ - CNN+LSTM model trained on RAVDESS dataset (`emotion_model.pth`)
-6. **Trained Sale Predictor** ✅ - XGBoost model trained with proper validation (`sale_model.pkl`)
+5. **Emotion Model Training Pipeline** ✅ - Wav2Vec2 training script is available (`backend/scripts/best_train_emotion_model.py`)
+6. **Sale Predictor Training Pipeline** ✅ - XGBoost training script is available (`backend/scripts/train_sale_predictor.py`)
 
 ### Integration & Infrastructure
 7. **MongoDB Atlas Support** ✅ - Code ready for Atlas connection with proper error handling
@@ -35,10 +35,10 @@ The following features have been fully implemented and are production-ready:
 ## 🎯 What's Working
 
 ### Models
-- ✅ Emotion detection model trained and saved
-- ✅ Sale prediction model trained and saved
-- ✅ Models load successfully for inference
-- ✅ Training scripts available and tested
+- ⚠️ Emotion model artifact is available in `backend/models/best_emotion_wav2vec2_v2/best_checkpoint`
+- ⚠️ Sale model artifact is available in `backend/models/sale_model.pkl`
+- ⚠️ Model loading for inference requires valid artifact paths and environment configuration
+- ✅ Training scripts are available
 
 ### API Endpoints
 - ✅ `/api/upload` - Async file upload (accepts both 'file' and 'audio' fields)
@@ -59,14 +59,14 @@ The following features have been fully implemented and are production-ready:
 
 ---
 
-## ⚠️ Optional Setup Tasks
+## ⚠️ Required Setup Tasks For Full Demo
 
-### Task 1: MongoDB Atlas Setup (Optional - Local MongoDB Works Too)
+### Task 1: MongoDB Setup (Required: Atlas or Local)
 
-**Priority:** OPTIONAL (local MongoDB works fine)  
+**Priority:** HIGH (required for upload/analyze/status/results/history flow)  
 **Estimated Time:** 30 minutes
 
-If you want to use MongoDB Atlas (cloud database):
+Use either local MongoDB or MongoDB Atlas. Atlas is recommended for a portable demo setup.
 
 1. **Create MongoDB Atlas Account**
    - Go to: https://www.mongodb.com/cloud/atlas
@@ -106,7 +106,7 @@ If you want to use MongoDB Atlas (cloud database):
    # Check logs - should see "✅ Successfully connected to MongoDB"
    ```
 
-**Note:** Local MongoDB (`mongodb://localhost:27017/`) works perfectly fine for development and testing!
+**Note:** If MongoDB is unavailable, backend endpoints that depend on persisted call state return `503` by design.
 
 ---
 
@@ -149,7 +149,7 @@ If you want to use MongoDB Atlas (cloud database):
 1. **Start Backend**
    ```bash
    cd backend
-   python -m uvicorn src.call_analysis.web_app_fastapi:app --reload --port 5000
+   python -m uvicorn src.call_analysis.web_app_fastapi:app --reload --port 8000
    ```
 
 2. **Start Frontend**
@@ -168,13 +168,13 @@ If you want to use MongoDB Atlas (cloud database):
 4. **Test API Endpoints**
    ```bash
    # Health check
-   curl http://localhost:5000/health
+   curl http://localhost:8000/health
    
    # Upload
-   curl -X POST http://localhost:5000/api/upload -F "audio=@test.wav"
+   curl -X POST http://localhost:8000/api/upload -F "audio=@test.wav"
    
    # Get status
-   curl http://localhost:5000/api/status/{call_id}
+   curl http://localhost:8000/api/status/{call_id}
    ```
 
 ### Model Validation
@@ -202,7 +202,7 @@ import numpy as np
 
 predictor = SalePredictor()
 predictor.load_model('backend/models/sale_model.pkl')
-features = np.random.randn(12)  # 12 features
+features = np.random.randn(11)  # 11 core training features
 result = predictor.predict_sale_probability(features)
 print('Sale prediction result:', result)
 ```
@@ -211,10 +211,10 @@ print('Sale prediction result:', result)
 
 ## 📊 Success Metrics
 
-Your FYP is complete! ✅
+Current completion state:
 
-- ✅ Emotion model trained and working
-- ✅ Sale predictor trained and working
+- ⚠️ Emotion model artifact available; retraining pipeline remains available
+- ⚠️ Sale predictor artifact available; retraining pipeline remains available
 - ✅ FinBERT support added
 - ✅ Key phrase extraction implemented
 - ✅ Filler word detection implemented
@@ -231,7 +231,7 @@ Your FYP is complete! ✅
 
 ### Models Not Loading
 - **Check:** Model files exist in `backend/models/`
-- **Verify:** `emotion_model.pth` and `sale_model.pkl` are present
+- **Verify:** `sale_model.pkl` is present and `EMOTION_MODEL_PATH` points to `backend/models/best_emotion_wav2vec2_v2/best_checkpoint`
 - **Test:** Run `python backend/scripts/validate_trained_models.py`
 
 ### MongoDB Connection Failed
@@ -240,7 +240,7 @@ Your FYP is complete! ✅
 - **For Local:** Ensure MongoDB is running (`mongod`)
 
 ### Frontend Can't Connect to Backend
-- **Check:** Backend running on port 5000
+- **Check:** Backend running on port 8000
 - **Check:** Frontend running on port 3000
 - **Verify:** CORS is configured (already done)
 - **Check:** `NEXT_PUBLIC_API_URL` if using custom URL
@@ -278,9 +278,9 @@ If you want to go beyond the requirements:
 
 ---
 
-## 🎉 Congratulations!
+## 🎉 Current Status
 
-Your FYP is essentially complete! All core features are implemented, models are trained, and the system is functional. The remaining tasks are optional setup (MongoDB Atlas, HF token) and testing/validation.
+Your FYP implementation is close to complete. Core features are implemented, but model artifacts are present in this repo state; ensure `EMOTION_MODEL_PATH` is set to the active checkpoint path.
 
 **You're ready for:**
 - ✅ Demo presentation
@@ -289,3 +289,7 @@ Your FYP is essentially complete! All core features are implemented, models are 
 - ✅ Testing with real data
 
 Good luck with your FYP submission! 🚀
+
+
+
+

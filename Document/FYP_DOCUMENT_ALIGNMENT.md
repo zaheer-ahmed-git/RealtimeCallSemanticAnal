@@ -74,7 +74,7 @@ This document verifies that the codebase aligns with the requirements specified 
 - **Emotions:** 5 categories - neutral, happiness, anger, sadness, frustration ✅
 - **Confidence:** Probability scores for each emotion ✅
 - **Transitions:** Per-segment emotion detection enables transition tracking ✅
-- **Model:** ✅ **TRAINED** - `emotion_model.pth` trained on RAVDESS dataset
+- **Model:** ✅ **TRAINED** - Wav2Vec2 checkpoint available at `backend/models/best_emotion_wav2vec2_v2/best_checkpoint`
 
 ---
 
@@ -158,7 +158,7 @@ This document verifies that the codebase aligns with the requirements specified 
 | **Emotion** | CNN+LSTM | CNN+LSTM with Temporal Attention | ✅ (exceeds) |
 | **Prediction** | XGBoost | XGBoost with Calibration | ✅ (exceeds) |
 | **Frontend** | React | React 18 + Next.js 14 + TypeScript | ✅ (exceeds) |
-| **Backend** | FastAPI/Flask | FastAPI | ✅ |
+| **Backend** | FastAPI/FastAPI | FastAPI | ✅ |
 | **Database** | PostgreSQL + MongoDB | MongoDB (Atlas supported) | ✅ |
 
 ---
@@ -178,7 +178,7 @@ This document verifies that the codebase aligns with the requirements specified 
 **Implementation:** ✅ **FULLY COMPLIANT**
 - Location: `SalePredictor.create_fused_feature_vector()`
 - Combines: Sentiment + Emotion + Conversational Dynamics
-- Total Features: 12 fused features (2 sentiment + 5 emotion + 4 dynamics + 1 filler word frequency)
+- Total Features: 11 core training features (2 sentiment + 5 emotion + 4 dynamics); runtime can also append optional `filler_word_frequency`
 
 ---
 
@@ -270,5 +270,7 @@ This document verifies that the codebase aligns with the requirements specified 
 
 ---
 
-**Last Updated:** 2025-01-XX  
+**Last Updated:** 2026-03-02  
 **Status:** All requirements met, system production-ready ✅
+
+
