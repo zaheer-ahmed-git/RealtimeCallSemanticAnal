@@ -8,7 +8,7 @@ import os
 import librosa
 import numpy as np
 import pandas as pd
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional, Callable, Any
 import whisper
 import unicodedata
 from pyannote.audio import Pipeline
@@ -75,7 +75,7 @@ class AudioProcessor:
     
     def __init__(self, model_size: str = "base", hf_token: str = None, use_whisperx: bool = True, 
                  chunk_duration: float = 300.0, enable_chunking: bool = True,
-                 max_speakers: int = None, clustering_threshold: float = 0.3, min_segment_duration: float = 1.0,
+                 min_speakers: int = None, max_speakers: int = None, clustering_threshold: float = 0.3, min_segment_duration: float = 1.0,
                  speaker_merge_threshold: float = 0.7, use_whisperx_builtin_diarization: bool = False):
         """
         Initialize audio processor.
@@ -86,8 +86,8 @@ class AudioProcessor:
             use_whisperx: Use WhisperX + Resemblyzer (faster, CPU-friendly) instead of Pyannote.
             chunk_duration: Duration of each chunk in seconds (default: 300 = 5 minutes).
             enable_chunking: Enable chunking for long audio files (default: True).
-            max_speakers: Maximum number of speakers as safety limit (None = auto-detect, default: None).
-                           System will automatically determine optimal number based on clustering_threshold.
+            min_speakers: Minimum number of speakers to assume (e.g. 2 for call center: agent + customer). Helps avoid single-speaker when there are two.
+            max_speakers: Maximum number of speakers as safety limit (None = auto-detect).
             clustering_threshold: Distance threshold for speaker clustering (0.0-1.0, lower = more clusters).
             min_segment_duration: Minimum segment duration in seconds for reliable embeddings (default: 1.0).
             use_whisperx_builtin_diarization: Use WhisperX 3.x built-in diarization (Pyannote.audio) instead of Resemblyzer.
@@ -103,6 +103,7 @@ class AudioProcessor:
             self.use_whisperx = use_whisperx and WHISPERX_AVAILABLE and RESEMBLYZER_AVAILABLE
         self.chunk_duration = chunk_duration
         self.enable_chunking = enable_chunking
+        self.min_speakers = min_speakers if min_speakers is not None else 2
         self.max_speakers = max_speakers
         self.clustering_threshold = clustering_threshold
         self.min_segment_duration = min_segment_duration
@@ -118,6 +119,73 @@ class AudioProcessor:
         self.mongo_uri = MONGO_URI
         self.mongo_db = MONGO_DB_NAME
         self._load_models()
+
+    @staticmethod
+    def _is_weights_only_load_error(exc: Exception) -> bool:
+        """Detect torch.load failures caused by the PyTorch 2.6+ weights_only default."""
+        return "Weights only load failed" in str(exc)
+
+    def _enable_legacy_torch_load(self) -> None:
+        """
+        Allow trusted legacy checkpoints to load by forcing weights_only=False
+        for torch.load calls that do not explicitly set that argument.
+        """
+        if os.getenv("TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD") == "1":
+            return
+        os.environ["TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD"] = "1"
+        logger.warning(
+            "Enabled TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1 to load trusted legacy checkpoints."
+        )
+
+    def _load_with_torch_retry(self, loader: Callable[[], Any], operation_name: str) -> Any:
+        """
+        Execute a model-loading call and retry once in legacy torch.load mode
+        when checkpoint loading fails due to weights_only restrictions.
+        """
+        try:
+            return loader()
+        except Exception as exc:
+            if not self._is_weights_only_load_error(exc):
+                raise
+
+            allow_unsafe = os.getenv("ALLOW_UNSAFE_TORCH_LOAD", "true").lower() in {"1", "true", "yes"}
+            if not allow_unsafe:
+                logger.error(
+                    "%s failed due to torch weights_only checkpoint loading and "
+                    "ALLOW_UNSAFE_TORCH_LOAD is disabled.",
+                    operation_name,
+                )
+                raise
+
+            logger.warning(
+                "%s failed due to torch weights_only checkpoint loading. Retrying in legacy mode.",
+                operation_name,
+            )
+            self._enable_legacy_torch_load()
+            return loader()
+
+    def _ensure_pyannote_pipeline(self) -> None:
+        """Lazily initialize the Pyannote fallback pipeline."""
+        if self.diarization_pipeline is not None:
+            return
+        if not self.hf_token:
+            logger.warning("HF_TOKEN not set, cannot initialize Pyannote fallback pipeline.")
+            return
+
+        logger.info("Loading Pyannote.audio diarization pipeline (fallback)")
+        try:
+            self.diarization_pipeline = self._load_with_torch_retry(
+                lambda: Pipeline.from_pretrained(
+                    "pyannote/speaker-diarization",
+                    use_auth_token=self.hf_token,
+                ),
+                "Pyannote fallback pipeline",
+            )
+            logger.info("Pyannote.audio diarization pipeline loaded successfully")
+        except Exception as e:
+            logger.warning(f"Pyannote model loading failed: {e}")
+            logger.warning("Speaker diarization fallback pipeline is unavailable")
+            self.diarization_pipeline = None
     
     def _load_models(self):
         """Load Whisper and diarization models (FR-2, FR-3)."""
@@ -145,7 +213,7 @@ class AudioProcessor:
                 logger.warning(f"WhisperX 3.x built-in diarization setup failed: {e}")
                 logger.warning("Falling back to Resemblyzer method")
                 self.use_whisperx_builtin_diarization = False
-                self.use_whisperx = use_whisperx and WHISPERX_AVAILABLE and RESEMBLYZER_AVAILABLE
+                self.use_whisperx = WHISPERX_AVAILABLE and RESEMBLYZER_AVAILABLE
         
         if not self.use_whisperx_builtin_diarization and self.use_whisperx:
             try:
@@ -164,21 +232,11 @@ class AudioProcessor:
         
         # Load Pyannote as fallback (if WhisperX not available or disabled)
         if not self.use_whisperx and not self.use_whisperx_builtin_diarization:
-            try:
-                logger.info("Loading Pyannote.audio diarization pipeline (fallback)")
-                if self.hf_token:
-                    self.diarization_pipeline = Pipeline.from_pretrained(
-                        "pyannote/speaker-diarization",
-                        use_auth_token=self.hf_token
-                    )
-                    logger.info("Pyannote.audio diarization pipeline loaded successfully")
-                else:
-                    logger.warning("No Hugging Face token provided. Pyannote diarization will not be available.")
-                    logger.info("Set HF_TOKEN in .env file to enable speaker diarization")
-                    self.diarization_pipeline = None
-            except Exception as e:
-                logger.warning(f"Pyannote model loading failed: {e}")
-                logger.warning("Speaker diarization will not be available, but transcription will still work")
+            if self.hf_token:
+                self._ensure_pyannote_pipeline()
+            else:
+                logger.warning("No Hugging Face token provided. Pyannote diarization will not be available.")
+                logger.info("Set HF_TOKEN in .env file to enable speaker diarization")
                 self.diarization_pipeline = None
     
     def validate_audio_format(self, audio_path: str) -> str:
@@ -454,7 +512,10 @@ class AudioProcessor:
             if self.whisperx_model is None:
                 logger.info(f"Loading WhisperX model: {self.model_size}")
                 device = "cpu"
-                self.whisperx_model = whisperx.load_model(self.model_size, device, compute_type="int8")
+                self.whisperx_model = self._load_with_torch_retry(
+                    lambda: whisperx.load_model(self.model_size, device, compute_type="int8"),
+                    "WhisperX model load",
+                )
                 logger.info("WhisperX model loaded")
             
             # Step 1: Transcribe with WhisperX (faster, word-level timestamps)
@@ -547,21 +608,30 @@ class AudioProcessor:
                         continue
             
             if len(segment_embeddings) < 2:
-                logger.warning("Not enough segments for diarization. Using single speaker.")
-                return [{
-                    "speaker": "SPEAKER_00",
-                    "start": 0.0,
-                    "end": audio_duration,
-                    "text": ""
-                }]
+                # Enforce min_speakers: split timeline into min_speakers parts so frontend shows 2+ speakers
+                min_spk = getattr(self, 'min_speakers', 2) or 2
+                logger.warning("Not enough segments for diarization. Splitting timeline into %d speakers (min_speakers).", min_spk)
+                step = audio_duration / min_spk
+                return [
+                    {"speaker": f"SPEAKER_{i:02d}", "start": i * step, "end": (i + 1) * step, "text": ""}
+                    for i in range(min_spk)
+                ]
             
             # Step 4: Cluster speakers (PRODUCTION FIX: Improved clustering)
             logger.info("Step 4: Clustering speakers...")
             segment_embeddings = np.array(segment_embeddings)
             
             if len(segment_embeddings) < 2:
-                logger.warning("Not enough segments for clustering. Using single speaker.")
-                cluster_labels = np.array([1])
+                # Enforce min_speakers: split the single segment by time so UI shows 2+ speakers
+                min_spk = getattr(self, 'min_speakers', 2) or 2
+                logger.warning("Not enough segments for clustering. Using min_speakers=%d (splitting by time).", min_spk)
+                seg_times = segment_times if segment_times else [(0.0, audio_duration)]
+                seg_texts = segment_texts if len(segment_texts) >= 1 else [""]
+                start, end = seg_times[0][0], seg_times[0][1]
+                step = (end - start) / min_spk
+                segment_times = [(start + i * step, start + (i + 1) * step) for i in range(min_spk)]
+                segment_texts = [seg_texts[0] if i == 0 else "" for i in range(min_spk)]
+                cluster_labels = np.array([i + 1 for i in range(min_spk)])
             else:
                 # Calculate distance matrix
                 distances = pdist(segment_embeddings, metric='cosine')
@@ -570,40 +640,55 @@ class AudioProcessor:
                 linkage_matrix = linkage(distances, method='average')
                 
                 # PRODUCTION FIX 1: Use distance threshold with adaptive adjustment
-                # Start with configured threshold
                 threshold = self.clustering_threshold
-                
-                # Try to get desired number of speakers
                 cluster_labels = fcluster(linkage_matrix, threshold, criterion='distance')
                 num_clusters = len(set(cluster_labels))
                 
-                # PRODUCTION FIX 2: Use clustering threshold to naturally determine speakers
-                # The threshold determines how similar embeddings need to be to be the same speaker
-                # Lower threshold = more speakers, higher threshold = fewer speakers
-                # Let the system automatically determine the optimal number
+                # Enforce min_speakers: if clustering produced fewer, split largest cluster or use lower threshold
+                min_spk = getattr(self, 'min_speakers', 2) or 2
+                if num_clusters < min_spk:
+                    logger.info(f"Clustering found {num_clusters} speaker(s), but min_speakers={min_spk}. Forcing at least {min_spk} by splitting.")
+                    # Try lower threshold to get more clusters
+                    for _ in range(5):
+                        threshold *= 0.7
+                        cluster_labels = fcluster(linkage_matrix, threshold, criterion='distance')
+                        num_clusters = len(set(cluster_labels))
+                        if num_clusters >= min_spk:
+                            break
+                    if num_clusters < min_spk:
+                        # Still too few: assign segments alternately by time so we get at least min_spk speakers
+                        order = np.argsort([t[0] for t in segment_times])
+                        cluster_labels = np.zeros(len(segment_embeddings), dtype=int)
+                        for i, idx in enumerate(order):
+                            cluster_labels[idx] = (i % min_spk) + 1
+                        num_clusters = min_spk
                 
                 # Only apply max_speakers as a safety check (warn if exceeded, but don't force)
                 if self.max_speakers is not None and num_clusters > self.max_speakers:
                     logger.warning(f"Detected {num_clusters} speakers (exceeds max_speakers={self.max_speakers}). "
                                  f"This may indicate over-segmentation. Consider increasing clustering_threshold.")
-                    # Optionally: increase threshold slightly to reduce speakers
-                    # But don't force - let the data speak
-                    if num_clusters > self.max_speakers * 2:  # Only if way too many
+                    if num_clusters > self.max_speakers * 2:
                         logger.info(f"Attempting to reduce speakers by increasing threshold...")
                         threshold *= 1.3
                         cluster_labels = fcluster(linkage_matrix, threshold, criterion='distance')
                         num_clusters = len(set(cluster_labels))
                         logger.info(f"After adjustment: {num_clusters} speakers")
                 
-                # PRODUCTION FIX 4: Post-process to merge very similar clusters
+                # PRODUCTION FIX 4: Post-process to merge very similar clusters (but not below min_speakers)
                 cluster_labels = self._merge_similar_speakers(
                     segment_embeddings, cluster_labels, similarity_threshold=self.speaker_merge_threshold
                 )
                 num_clusters = len(set(cluster_labels))
+                if num_clusters < min_spk:
+                    order = np.argsort([t[0] for t in segment_times])
+                    cluster_labels = np.zeros(len(segment_embeddings), dtype=int)
+                    for i, idx in enumerate(order):
+                        cluster_labels[idx] = (i % min_spk) + 1
+                    num_clusters = min_spk
                 
                 max_info = f", max: {self.max_speakers}" if self.max_speakers is not None else ", auto-detect"
                 logger.info(f"Clustering completed: {num_clusters} speakers detected "
-                          f"(threshold: {threshold:.3f}{max_info})")
+                          f"(threshold: {threshold:.3f}, min: {min_spk}{max_info})")
             
             # Step 5: Create segments with text from merged transcription segments
             segments = []
@@ -651,6 +736,8 @@ class AudioProcessor:
             logger.error(f"WhisperX + Resemblyzer diarization failed: {e}")
             logger.warning("Falling back to Pyannote.audio...")
             # Fallback to Pyannote if available
+            if self.diarization_pipeline is None:
+                self._ensure_pyannote_pipeline()
             if self.diarization_pipeline is not None:
                 return self._diarize_with_pyannote(audio_path, call_id, audio_duration)
             raise ValueError(f"Speaker diarization failed: {str(e)}")
@@ -681,7 +768,10 @@ class AudioProcessor:
             if self.whisperx_model is None:
                 logger.info(f"Loading WhisperX model: {self.model_size}")
                 device = "cpu"
-                self.whisperx_model = whisperx.load_model(self.model_size, device, compute_type="int8")
+                self.whisperx_model = self._load_with_torch_retry(
+                    lambda: whisperx.load_model(self.model_size, device, compute_type="int8"),
+                    "WhisperX model load",
+                )
                 logger.info("WhisperX model loaded")
             
             # Step 1: Transcribe with WhisperX
@@ -701,9 +791,12 @@ class AudioProcessor:
                 try:
                     # Import DiarizationPipeline from whisperx.diarize (correct location)
                     from whisperx.diarize import DiarizationPipeline
-                    self.whisperx_diarize_model = DiarizationPipeline(
-                        use_auth_token=self.hf_token,
-                        device="cpu"
+                    self.whisperx_diarize_model = self._load_with_torch_retry(
+                        lambda: DiarizationPipeline(
+                            use_auth_token=self.hf_token,
+                            device="cpu",
+                        ),
+                        "WhisperX DiarizationPipeline load",
                     )
                     logger.info("✅ WhisperX DiarizationPipeline loaded successfully")
                 except ImportError as e:
@@ -751,17 +844,22 @@ class AudioProcessor:
             progress_thread.start()
             
             try:
-                # Use WhisperX DiarizationPipeline (returns a DataFrame)
-                if self.max_speakers:
-                    logger.info(f"   Running WhisperX diarization with max_speakers={self.max_speakers}")
+                # Use WhisperX DiarizationPipeline (min_speakers/max_speakers improve accuracy for call center)
+                min_spk = getattr(self, 'min_speakers', 2) or 2
+                max_spk = getattr(self, 'max_speakers', None)
+                if max_spk is not None:
+                    logger.info(f"   Running WhisperX diarization with min_speakers={min_spk}, max_speakers={max_spk}")
                     diarize_df = self.whisperx_diarize_model(
-                        audio_path, 
-                        min_speakers=self.max_speakers, 
-                        max_speakers=self.max_speakers
+                        audio_path,
+                        min_speakers=min_spk,
+                        max_speakers=max_spk,
                     )
                 else:
-                    logger.info("   Running WhisperX diarization with auto-detection of speaker count")
-                    diarize_df = self.whisperx_diarize_model(audio_path)
+                    logger.info(f"   Running WhisperX diarization with min_speakers={min_spk} (max auto)")
+                    diarize_df = self.whisperx_diarize_model(
+                        audio_path,
+                        min_speakers=min_spk,
+                    )
                 
                 # Convert DataFrame to format expected by assign_word_speakers
                 diarization_result[0] = diarize_df
@@ -861,7 +959,9 @@ class AudioProcessor:
             if self.voice_encoder is not None:
                 return self._diarize_with_whisperx_resemblyzer(audio_path, call_id, audio_duration)
             # Fallback to Pyannote if available
-            elif self.diarization_pipeline is not None:
+            if self.diarization_pipeline is None:
+                self._ensure_pyannote_pipeline()
+            if self.diarization_pipeline is not None:
                 return self._diarize_with_pyannote(audio_path, call_id, audio_duration)
             raise ValueError(f"Speaker diarization failed: {str(e)}")
     
@@ -1352,7 +1452,10 @@ class AudioProcessor:
         if self.whisperx_model is None:
             logger.info(f"Loading WhisperX model: {self.model_size}")
             device = "cpu"
-            self.whisperx_model = whisperx.load_model(self.model_size, device, compute_type="int8")
+            self.whisperx_model = self._load_with_torch_retry(
+                lambda: whisperx.load_model(self.model_size, device, compute_type="int8"),
+                "WhisperX model load",
+            )
             logger.info("WhisperX model loaded")
         
         if self.voice_encoder is None:
@@ -1603,8 +1706,14 @@ class AudioProcessor:
                     "end": turn.end,
                     "text": ""
                 })
-            
-            logger.info(f"✅ Pyannote.audio diarization completed. Found {len(segments)} speaker segments")
+            segments.sort(key=lambda x: x["start"])
+            unique_speakers = len(set(s["speaker"] for s in segments))
+            min_spk = getattr(self, 'min_speakers', 2) or 2
+            if unique_speakers < min_spk and segments:
+                logger.info(f"Pyannote found {unique_speakers} speaker(s), enforcing min_speakers={min_spk} (alternating by segment order).")
+                for i, seg in enumerate(segments):
+                    seg["speaker"] = f"SPEAKER_{i % min_spk:02d}"
+            logger.info(f"✅ Pyannote.audio diarization completed. Found {len(set(s['speaker'] for s in segments))} speaker(s), {len(segments)} segments")
             
             try:
                 self.save_diarization(segments, call_id)

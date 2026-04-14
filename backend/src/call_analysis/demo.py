@@ -35,11 +35,15 @@ except OSError:
 class DemoSystem:
     """Demo system for showcasing call analysis capabilities (SRS1 POC)."""
     
-    def __init__(self, hf_token: str = None):
+    def __init__(self, hf_token: str = None, min_speakers: int = None, max_speakers: int = None):
         """Initialize demo system."""
         self.analyzer = ConversationAnalyzer()
         self.dashboard = Dashboard()
-        self.audio_processor = AudioProcessor(hf_token=hf_token)
+        self.audio_processor = AudioProcessor(
+            hf_token=hf_token,
+            min_speakers=min_speakers,
+            max_speakers=max_speakers,
+        )
         self.text_processor = TextProcessor()
         self.feature_extractor = FeatureExtractor()
         

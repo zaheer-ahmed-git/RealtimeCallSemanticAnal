@@ -120,4 +120,4 @@ dmypy.json
 !frontend/src/lib/
 !frontend/src/lib/**
 
-explanation/
+explanation/.venv-train/

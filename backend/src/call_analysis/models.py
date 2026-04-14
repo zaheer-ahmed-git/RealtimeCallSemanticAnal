@@ -12,6 +12,7 @@ import torch.nn as nn
 from transformers import AutoTokenizer, AutoModel, pipeline
 import joblib
 import os
+from pathlib import Path
 
 
 # ============================================================================
@@ -248,7 +249,7 @@ class SentimentAnalyzer:
                 self.sentiment_pipeline = pipeline(
                     "sentiment-analysis",
                     model=load_sentiment_from,
-                    return_all_scores=False,
+                    top_k=1,
                     **hf_kw
                 )
                 logger.info("Sentiment analysis pipeline loaded successfully")
@@ -261,6 +262,33 @@ class SentimentAnalyzer:
             logger.warning(f"Could not load models: {e}")
             logger.info("Falling back to keyword-based sentiment analysis")
             self.sentiment_pipeline = None
+
+    def _extract_single_sentiment_result(self, pipeline_output: Any) -> Dict[str, Any]:
+        """
+        Normalize transformers pipeline output to a single result dict.
+
+        Handles multiple output shapes seen across transformers versions/configs:
+        - {'label': ..., 'score': ...}
+        - [{'label': ..., 'score': ...}]
+        - [[{'label': ..., 'score': ...}]]  # e.g., pipeline configured with top_k
+        """
+        if isinstance(pipeline_output, dict):
+            return pipeline_output
+
+        if isinstance(pipeline_output, list) and pipeline_output:
+            first = pipeline_output[0]
+            if isinstance(first, list):
+                if not first:
+                    raise ValueError("Empty nested sentiment output from pipeline")
+                first = first[0]
+
+            if isinstance(first, dict):
+                return first
+
+        raise TypeError(
+            f"Unexpected sentiment pipeline output type: {type(pipeline_output)} "
+            f"with value: {pipeline_output}"
+        )
     
     # ============================================================================
     # EXTRA: BERT embeddings extraction (not explicitly required by documentation)
@@ -364,7 +392,8 @@ class SentimentAnalyzer:
         # Use ML-based sentiment pipeline if available
         if self.sentiment_pipeline is not None:
             try:
-                result = self.sentiment_pipeline(text)[0]
+                raw_output = self.sentiment_pipeline(text)
+                result = self._extract_single_sentiment_result(raw_output)
                 label = result['label']  # 'POSITIVE' or 'NEGATIVE'
                 score = result['score']
                 
@@ -1293,7 +1322,14 @@ class SalePredictor:
         """Load trained XGBoost model"""
         try:
             self.model = joblib.load(model_path)
-            self.feature_importance = self.model.feature_importances_
+
+            # Some training pipelines wrap the base XGBoost model (e.g., CalibratedClassifierCV),
+            # so feature_importances_ may not be present on the top-level estimator.
+            feature_importance = getattr(self.model, "feature_importances_", None)
+            if feature_importance is None and hasattr(self.model, "base_estimator_"):
+                feature_importance = getattr(self.model.base_estimator_, "feature_importances_", None)
+            self.feature_importance = feature_importance
+
             self.is_trained = True
             
             # FIXED: Try to load threshold from training results JSON
@@ -1354,7 +1390,8 @@ class SalePredictor:
         
         # Test inference with dummy feature vector (11 features minimum)
         try:
-            dummy_features = np.random.randn(11)
+            expected_features = self._get_expected_feature_count() or 11
+            dummy_features = np.random.randn(expected_features)
             result = self.predict_sale_probability(dummy_features)
             
             # Validate result structure
@@ -1436,6 +1473,54 @@ class SalePredictor:
                 f"Expected at least {expected_min} features, got {feature_count}. "
                 "Ensure all required features (sentiment, emotion, dynamics) are included."
             )
+
+    def _get_expected_feature_count(self) -> Optional[int]:
+        """Get expected feature count from loaded model metadata, when available."""
+        if self.model is None:
+            return None
+
+        expected = getattr(self.model, "n_features_in_", None)
+        if expected is not None:
+            return int(expected)
+
+        base_estimator = getattr(self.model, "base_estimator_", None)
+        if base_estimator is not None:
+            base_expected = getattr(base_estimator, "n_features_in_", None)
+            if base_expected is not None:
+                return int(base_expected)
+
+        return None
+
+    def _align_feature_count(self, fused_features: np.ndarray) -> np.ndarray:
+        """
+        Align feature vector width to what the trained model expects.
+
+        - If input has extra features, truncate trailing features.
+        - If input has fewer features, right-pad with zeros.
+        """
+        expected = self._get_expected_feature_count()
+        if expected is None:
+            return fused_features
+
+        current = fused_features.shape[1]
+        if current == expected:
+            return fused_features
+
+        if current > expected:
+            logger.warning(
+                "Feature count mismatch: model expects %d, got %d. Truncating extra features.",
+                expected,
+                current,
+            )
+            return fused_features[:, :expected]
+
+        logger.warning(
+            "Feature count mismatch: model expects %d, got %d. Padding missing features with zeros.",
+            expected,
+            current,
+        )
+        pad_width = expected - current
+        return np.pad(fused_features, ((0, 0), (0, pad_width)), mode="constant")
     
     @log_performance
     def predict_sale_probability(self, fused_features: np.ndarray) -> Dict:
@@ -1471,6 +1556,9 @@ class SalePredictor:
             # Ensure correct shape
             if len(fused_features.shape) == 1:
                 fused_features = fused_features.reshape(1, -1)
+
+            # Align to model-trained feature width (for backward compatibility across model versions)
+            fused_features = self._align_feature_count(fused_features)
             
             # FIXED: Apply imputation if imputer is available (handle missing values)
             if self.imputer is not None:
@@ -1646,18 +1734,31 @@ class ConversationAnalyzer:
             sale_model_path: Path to sale prediction model (default: backend/models/sale_model.pkl)
         """
         self.sentiment_analyzer = SentimentAnalyzer()
-        
-        # Default model paths
-        default_emotion_path = 'backend/models/emotion_model.pth'
-        default_best_emotion_path = 'backend/models/best_emotion_wav2vec2/best_checkpoint'
-        default_sale_path = 'backend/models/sale_model.pkl'
+
+        # Resolve paths relative to the backend project root, independent of CWD.
+        # models.py lives in backend/src/call_analysis/, so backend root is 3 levels up.
+        backend_root = Path(__file__).resolve().parents[2]
+        models_dir = backend_root / "models"
+
+        # Default model paths (absolute)
+        default_emotion_path = str(models_dir / "emotion_model.pth")
+        default_best_emotion_path = str(models_dir / "best_emotion_wav2vec2" / "best_checkpoint")
+        default_best_emotion_path_v2 = str(models_dir / "best_emotion_wav2vec2_v2" / "best_checkpoint")
+        default_sale_path = str(models_dir / "sale_model.pkl")
         
         # Use explicit path, env override, or best-available default.
         env_emotion_path = os.getenv('EMOTION_MODEL_PATH')
         emotion_path = emotion_model_path or env_emotion_path or default_emotion_path
-        if not emotion_model_path and not env_emotion_path and not os.path.exists(emotion_path) and os.path.exists(default_best_emotion_path):
-            emotion_path = default_best_emotion_path
-            logger.info(f"Using best emotion checkpoint by default: {emotion_path}")
+
+        # If no explicit emotion model provided and the default file is missing,
+        # fall back to the best available wav2vec2 checkpoint (prefer v2 if present).
+        if not emotion_model_path and not env_emotion_path and not os.path.exists(emotion_path):
+            if os.path.exists(default_best_emotion_path_v2):
+                emotion_path = default_best_emotion_path_v2
+                logger.info(f"Using best emotion checkpoint v2 by default: {emotion_path}")
+            elif os.path.exists(default_best_emotion_path):
+                emotion_path = default_best_emotion_path
+                logger.info(f"Using best emotion checkpoint by default: {emotion_path}")
         sale_path = sale_model_path or default_sale_path
         
         # Initialize with model paths (will load if files exist)

@@ -582,7 +582,11 @@ def main():
         raise FileNotFoundError(f"CSV file not found: {args.csv_path}")
     
     # Create output directory
+    # Relative paths resolve against the repo root (so it works from any CWD)
+    repo_root = Path(__file__).resolve().parents[2]
     output_path = Path(args.output_dir)
+    if not output_path.is_absolute() and not output_path.exists():
+        output_path = repo_root / output_path
     output_path.mkdir(parents=True, exist_ok=True)
     
     # Load and preprocess data (FIXED: no data leakage)

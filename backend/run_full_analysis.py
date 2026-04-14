@@ -82,7 +82,9 @@ def run_full_analysis(audio_path: str, call_id: str = None, output_dir: str = No
         
         audio_processor = AudioProcessor(
             model_size=Config.WHISPER_MODEL_SIZE or "base",
-            hf_token=Config.HF_TOKEN
+            hf_token=Config.HF_TOKEN,
+            min_speakers=getattr(Config, 'MIN_SPEAKERS', 2),
+            max_speakers=getattr(Config, 'MAX_SPEAKERS', None),
         )
         text_processor = TextProcessor()
         feature_extractor = FeatureExtractor()

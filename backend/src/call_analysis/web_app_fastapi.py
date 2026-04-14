@@ -27,6 +27,8 @@ import json
 import logging
 from datetime import datetime
 from typing import Any, Dict, List, Optional
+from contextlib import asynccontextmanager
+from urllib.parse import urlparse
 
 from fastapi import (
     FastAPI,
@@ -40,6 +42,8 @@ from fastapi import (
 )
 import threading
 import numpy as np
+from omegaconf import ListConfig
+from torch.serialization import add_safe_globals
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse, Response
 from pydantic import BaseModel
@@ -55,6 +59,16 @@ import sys as _sys
 _sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 from config import Config  # type: ignore  # noqa: E402
 
+# Allow torch.load with weights_only=True to unpickle OmegaConf ListConfig safely
+try:
+    add_safe_globals([ListConfig])
+except Exception:
+    # If this fails (e.g., older torch), we continue with default behavior
+    logging.getLogger(__name__).debug(
+        "Could not register OmegaConf ListConfig with torch.serialization.add_safe_globals",
+        exc_info=True,
+    )
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -66,10 +80,16 @@ class StartAnalysisRequest(BaseModel):
 
 
 def create_app() -> FastAPI:
+    @asynccontextmanager
+    async def lifespan(_: FastAPI):
+        Config.init_directories()
+        yield
+
     app = FastAPI(
         title="Call Analysis System API",
         description="FastAPI backend for call analysis, compatible with existing Next.js frontend.",
         version="1.0.0",
+        lifespan=lifespan,
     )
 
     # CORS for frontend (Next.js on localhost:3000)
@@ -86,25 +106,51 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
-    # Initialize directories on startup
-    @app.on_event("startup")
-    def startup_event():
-        Config.init_directories()
-
-    # Initialize shared components
-    demo_system = DemoSystem(hf_token=Config.HF_TOKEN)
+    # Initialize shared components (min_speakers=2 for call center: agent + customer)
+    demo_system = DemoSystem(
+        hf_token=Config.HF_TOKEN,
+        min_speakers=getattr(Config, 'MIN_SPEAKERS', 2),
+        max_speakers=getattr(Config, 'MAX_SPEAKERS', None),
+    )
     analyzer = ConversationAnalyzer()
     dashboard = Dashboard()
     
     # Initialize MongoDB client with proper connection options for Atlas
     mongo_client = None
     db = None
-    
+
+    def _sanitize_mongo_uri(uri: str) -> str:
+        """
+        Return a redacted version of the Mongo URI for logging (no credentials).
+        """
+        if not uri:
+            return "<empty>"
+        try:
+            parsed = urlparse(uri)
+            netloc = parsed.netloc
+            # Strip credentials if present
+            if "@" in netloc:
+                netloc = netloc.split("@", 1)[1]
+            redacted = f"{parsed.scheme}://{netloc}{parsed.path or ''}"
+            if parsed.query:
+                redacted += f"?{parsed.query}"
+            return redacted
+        except Exception:
+            # Fall back to generic placeholder
+            return "<redacted>"
+
     try:
         logger.info("Attempting to connect to MongoDB...")
-        
+        logger.info(
+            "MongoDB config: enabled=%s, uri_set=%s, database=%s, uri=%s",
+            bool(getattr(Config, "MONGODB_ENABLED", True)),
+            bool(Config.MONGODB_URI),
+            getattr(Config, "MONGODB_DATABASE", "<unset>"),
+            _sanitize_mongo_uri(Config.MONGODB_URI),
+        )
+
         # For MongoDB Atlas, use connection options that handle SSL/TLS properly
-        if Config.MONGODB_URI.startswith('mongodb+srv://') or 'mongodb.net' in Config.MONGODB_URI:
+        if Config.MONGODB_URI.startswith("mongodb+srv://") or "mongodb.net" in Config.MONGODB_URI:
             # Atlas connection - use longer timeouts and retry options
             logger.info("Detected MongoDB Atlas connection string")
             mongo_client = MongoClient(
@@ -124,20 +170,22 @@ def create_app() -> FastAPI:
                 Config.MONGODB_URI,
                 serverSelectionTimeoutMS=10000,
             )
-        
+
         # Test connection immediately with better error reporting
-        logger.info("Testing MongoDB connection...")
-        mongo_client.admin.command('ping')
-        logger.info(f"✅ Successfully connected to MongoDB: {Config.MONGODB_DATABASE}")
+        logger.info("Testing MongoDB connection with 'ping' command...")
+        mongo_client.admin.command("ping")
+        logger.info("✅ Successfully connected to MongoDB database '%s'", Config.MONGODB_DATABASE)
         db = mongo_client[Config.MONGODB_DATABASE]
-        
+
     except Exception as e:
         error_msg = str(e)
-        logger.error(f"❌ Failed to connect to MongoDB")
-        logger.error(f"   Error: {error_msg}")
-        
+        logger.error("❌ Failed to connect to MongoDB", exc_info=True)
+        logger.error("   Error type: %s", type(e).__name__)
+        logger.error("   Error message: %s", error_msg)
+        logger.error("   Effective URI (redacted): %s", _sanitize_mongo_uri(Config.MONGODB_URI))
+
         # Provide helpful diagnostic messages
-        if 'ServerSelectionTimeoutError' in error_msg or 'No replica set members found' in error_msg:
+        if "ServerSelectionTimeoutError" in error_msg or "No replica set members found" in error_msg:
             logger.error("")
             logger.error("🔍 DIAGNOSTIC: This usually means:")
             logger.error("   1. Your IP address is not whitelisted in MongoDB Atlas")
@@ -149,25 +197,28 @@ def create_app() -> FastAPI:
             logger.error("💡 Quick fix: Add your IP to Atlas Network Access:")
             logger.error("   https://cloud.mongodb.com/v2#/security/network/whitelist")
             logger.error("")
-        elif 'authentication' in error_msg.lower() or 'auth' in error_msg.lower():
+        elif "authentication" in error_msg.lower() or "auth" in error_msg.lower():
             logger.error("")
             logger.error("🔍 DIAGNOSTIC: Authentication failed")
             logger.error("   → Check your username and password in MONGODB_URI")
             logger.error("   → Verify database user has read/write permissions")
             logger.error("")
-        elif 'SSL' in error_msg or 'TLS' in error_msg:
+        elif "SSL" in error_msg or "TLS" in error_msg:
             logger.error("")
             logger.error("🔍 DIAGNOSTIC: SSL/TLS handshake failed")
             logger.error("   → Check your connection string format")
             logger.error("   → Ensure you're using 'mongodb+srv://' for Atlas")
             logger.error("")
-        
-        logger.error(f"   Connection URI format: {'mongodb+srv://' if Config.MONGODB_URI.startswith('mongodb+srv://') else 'mongodb://'}...")
+
+        logger.error(
+            "   Connection URI format: %s...",
+            "mongodb+srv://" if Config.MONGODB_URI.startswith("mongodb+srv://") else "mongodb://",
+        )
         logger.error("")
         logger.error("⚠️  Backend will start but MongoDB-dependent features will fail.")
         logger.error("   Fix the connection and restart the server.")
         logger.error("")
-        
+
         # Don't raise error - allow app to start but log the issue
         # This way the API can still serve non-database endpoints
         mongo_client = None
@@ -186,14 +237,29 @@ def create_app() -> FastAPI:
     def check_mongodb_connection() -> None:
         """Check if MongoDB is connected and reachable, raise HTTPException if not."""
         if db is None:
+            logger.error(
+                "MongoDB check failed: no active DB handle. "
+                "Startup connection likely failed – see earlier MongoDB logs for root cause."
+            )
+            logger.error(
+                "MongoDB runtime config at failure time: uri=%s, database=%s",
+                _sanitize_mongo_uri(Config.MONGODB_URI),
+                getattr(Config, "MONGODB_DATABASE", "<unset>"),
+            )
             raise HTTPException(
                 status_code=503,
                 detail=mongodb_unavailable_detail,
             )
         try:
+            logger.debug("Pinging MongoDB from request-time health check...")
             db.command("ping")
         except Exception as exc:
-            logger.error(f"MongoDB ping failed: {exc}")
+            logger.error("MongoDB ping failed during request: %s", exc, exc_info=True)
+            logger.error(
+                "MongoDB runtime config at ping failure: uri=%s, database=%s",
+                _sanitize_mongo_uri(Config.MONGODB_URI),
+                getattr(Config, "MONGODB_DATABASE", "<unset>"),
+            )
             raise HTTPException(
                 status_code=503,
                 detail=mongodb_unavailable_detail,
@@ -1149,6 +1215,5 @@ def create_app() -> FastAPI:
 
 
 app = create_app()
-
 
 

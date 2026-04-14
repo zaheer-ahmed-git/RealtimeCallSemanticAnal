@@ -9,6 +9,7 @@ interface EmotionChartProps {
 const EmotionChart = ({ data }: EmotionChartProps) => {
   // Transform data for the chart
   const chartData = Object.entries(data).map(([emotion, value]) => ({
+    emotion,
     name: emotion.charAt(0).toUpperCase() + emotion.slice(1),
     value: value,
     percentage: ((value / Object.values(data).reduce((a, b) => a + b, 0)) * 100).toFixed(1),
@@ -16,10 +17,14 @@ const EmotionChart = ({ data }: EmotionChartProps) => {
 
   // Color palette for emotions
   const COLORS = {
+    happiness: '#22c55e',
     happy: '#22c55e',
     neutral: '#6b7280',
+    sadness: '#3b82f6',
     sad: '#3b82f6',
+    anger: '#ef4444',
     angry: '#ef4444',
+    frustration: '#f97316',
     fearful: '#f59e0b',
     surprised: '#1e40af',
     disgusted: '#10b981',
@@ -49,7 +54,7 @@ const EmotionChart = ({ data }: EmotionChartProps) => {
             dataKey="value"
           >
             {chartData.map((entry, index) => (
-              <Cell key={`cell-${index}`} fill={getColor(entry.name)} />
+              <Cell key={`cell-${index}`} fill={getColor(entry.emotion)} />
             ))}
           </Pie>
           <Tooltip formatter={formatTooltip} />

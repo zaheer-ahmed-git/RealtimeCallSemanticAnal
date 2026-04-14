@@ -43,6 +43,12 @@ class Config:
     SENTIMENT_LOCAL_FILES_ONLY = os.getenv('SENTIMENT_LOCAL_FILES_ONLY', 'False').lower() == 'true'
     PYANNOTE_AUDIO_MODEL = os.getenv('PYANNOTE_AUDIO_MODEL', 'pyannote/speaker-diarization')
     
+    # Speaker diarization: minimum/maximum number of speakers (call center = 2: agent + customer)
+    _min_spk = os.getenv('MIN_SPEAKERS', '2')
+    MIN_SPEAKERS = int(_min_spk) if str(_min_spk).strip().isdigit() else 2
+    _max_spk = os.getenv('MAX_SPEAKERS', '')
+    MAX_SPEAKERS = int(_max_spk) if str(_max_spk).strip().isdigit() else None
+    
     # File Upload Configuration
     UPLOAD_FOLDER = os.getenv('UPLOAD_FOLDER', 'uploads')
     # Handle MAX_CONTENT_LENGTH with proper parsing

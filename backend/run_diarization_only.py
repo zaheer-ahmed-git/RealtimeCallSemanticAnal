@@ -33,6 +33,7 @@ def run_diarization_only(
     audio_path: str,
     transcription_json: str,
     output_dir: str = None,
+    min_speakers: int = None,
     max_speakers: int = 3,
     clustering_threshold: float = 0.3,
     min_segment_duration: float = 1.0,
@@ -46,6 +47,7 @@ def run_diarization_only(
         audio_path: Path to audio file
         transcription_json: Path to existing transcription JSON file
         output_dir: Directory to save results (default: output/)
+        min_speakers: Minimum number of speakers (e.g. 2 for call center). Default from Config.MIN_SPEAKERS or 2.
         max_speakers: Maximum number of speakers to detect
         clustering_threshold: Distance threshold for speaker clustering (0.0-1.0, lower = more clusters)
         min_segment_duration: Minimum segment duration in seconds
@@ -130,7 +132,9 @@ def run_diarization_only(
         # ============================================================
         # STEP 1: Initialize AudioProcessor with custom parameters
         # ============================================================
+        min_spk = min_speakers if min_speakers is not None else getattr(Config, 'MIN_SPEAKERS', 2)
         print("🔧 Step 1: Initializing AudioProcessor with custom parameters...")
+        print(f"   Min speakers: {min_spk}")
         if max_speakers is not None:
             print(f"   Max speakers (safety limit): {max_speakers}")
         else:
@@ -148,6 +152,7 @@ def run_diarization_only(
         audio_processor = AudioProcessor(
             model_size=Config.WHISPER_MODEL_SIZE or "base",
             hf_token=Config.HF_TOKEN,
+            min_speakers=min_spk,
             max_speakers=max_speakers,
             clustering_threshold=clustering_threshold,
             min_segment_duration=min_segment_duration,
@@ -334,6 +339,13 @@ Examples:
     )
     
     parser.add_argument(
+        '--min-speakers',
+        type=int,
+        default=None,
+        help='Minimum number of speakers (e.g. 2 for call center). Default: from .env MIN_SPEAKERS or 2.'
+    )
+    
+    parser.add_argument(
         '--max-speakers',
         type=int,
         default=None,
@@ -375,6 +387,7 @@ Examples:
         audio_path=args.audio_path,
         transcription_json=args.transcription_file,
         output_dir=args.output_dir,
+        min_speakers=args.min_speakers,
         max_speakers=args.max_speakers,
         clustering_threshold=args.clustering_threshold,
         min_segment_duration=args.min_segment_duration,

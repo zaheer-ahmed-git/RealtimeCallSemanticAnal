@@ -65,6 +65,10 @@ SENTIMENT_MODEL=distilbert
 # Optional: true = load only from cache/local path, no network (set after first download)
 # SENTIMENT_LOCAL_FILES_ONLY=False
 PYANNOTE_AUDIO_MODEL=pyannote/speaker-diarization
+# Minimum number of speakers (e.g. 2 for call center: agent + customer). Helps avoid single-speaker when there are two.
+MIN_SPEAKERS=2
+# Maximum number of speakers (optional; leave empty for auto). Use to cap over-segmentation.
+# MAX_SPEAKERS=4
 # Recommended for current repository artifacts:
 # EMOTION_MODEL_PATH=backend/models/best_emotion_wav2vec2_v2/best_checkpoint
 
